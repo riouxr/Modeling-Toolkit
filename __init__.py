@@ -1,5 +1,5 @@
 bl_info = {
-    "name": "Modeling toolkit",
+    "name": "BB Modeling toolkit",
     "category": "Mesh",
     "author": "Blender Bob",
     "version": (2, 0),
@@ -677,7 +677,7 @@ class MESH_OT_isolate_concave(bpy.types.Operator):
 # --------------------------------------------------------------------
 
 class VIEW3D_PT_gaming_toolkit(bpy.types.Panel):
-    bl_label = "Modeling Toolkit"
+    bl_label = "BB Modeling Toolkit"
     bl_category = "Tool"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
