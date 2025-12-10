@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "GamingToolkit"
-version = "1.0.0"
+version = "2.0.0"
 name = "Gaming Toolkit"
 tagline = "Gaming Toolkit"
 maintainer = "Blender Bob"
