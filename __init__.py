@@ -625,7 +625,7 @@ class MESH_OT_cleanup(bpy.types.Operator):
             bmesh.ops.delete(bm, geom=loose_verts, context='VERTS')
 
         # ----------------------------
-        # 4. Delete loose edges (no faces attached)
+        # 4. Delete loose edges
         # ----------------------------
         loose_edges = [e for e in bm.edges if len(e.link_faces) == 0]
         if loose_edges:
@@ -634,13 +634,25 @@ class MESH_OT_cleanup(bpy.types.Operator):
         bmesh.update_edit_mesh(me)
 
         # ----------------------------
-        # 5. Recalculate normals (outside)
+        # 5. Recalculate normals (requires selecting all faces)
         # ----------------------------
+        # Save current selection mode
+        prev_mode = context.tool_settings.mesh_select_mode[:]
+
+        # Switch to face mode
+        context.tool_settings.mesh_select_mode = (False, False, True)
+
+        # Select all faces
+        bpy.ops.mesh.select_all(action='SELECT')
+
+        # Recalculate normals
         bpy.ops.mesh.normals_make_consistent(inside=False)
 
-        self.report({'INFO'}, "Cleanup complete (Merged, removed duplicates, removed loose geo, normals fixed)")
-        return {'FINISHED'}
+        # Restore selection mode
+        context.tool_settings.mesh_select_mode = prev_mode
 
+        self.report({'INFO'}, "Cleanup complete (Merged, removed duplicates/loose geo, normals fixed)")
+        return {'FINISHED'}
 
 # --------------------------------------------------------------------
 # Operator: Apply Decimate
