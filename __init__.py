@@ -2,7 +2,7 @@ bl_info = {
     "name": "BB Modeling toolkit",
     "category": "Mesh",
     "author": "Blender Bob",
-    "version": (2, 0),
+    "version": (3, 0),
     "blender": (4, 5, 0),
     "location": "View3D > N panel > Modeling toolkit",
     "description": "Most used tools when modeling for gaming",
@@ -11,7 +11,7 @@ bl_info = {
 import bpy
 import bmesh
 from mathutils import Vector
-
+from math import radians
 
 # --------------------------------------------------------------------
 # Helper: Concave faces
@@ -259,6 +259,17 @@ def select_overlapping_faces_fast(obj, threshold=0.0001):
 
     bmesh.update_edit_mesh(me)
 
+# --------------------------------------------------------------------
+# Helper: decimate slider
+# --------------------------------------------------------------------
+def update_decimate_angle(self, context):
+    obj = context.object
+    if not obj or obj.type != 'MESH':
+        return
+    dec = obj.modifiers.get("DecimatePlanar")
+    if dec:
+        from math import radians
+        dec.angle_limit = radians(context.scene.decimate_angle_limit)
 
 # --------------------------------------------------------------------
 # Helper: detect n-gons and select faces
@@ -270,30 +281,6 @@ def select_ngons(obj):
     for f in bm.faces:
         f.select = len(f.verts) > 4
     bmesh.update_edit_mesh(obj.data)
-
-# --------------------------------------------------------------------
-# Operator: Fix Overlapping Faces
-# --------------------------------------------------------------------
-class MESH_OT_fix_overlapping_faces(bpy.types.Operator):
-    bl_idname = "mesh.fix_overlapping_faces"
-    bl_label = "Fix Overlapping Faces"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    threshold: bpy.props.FloatProperty(
-        name="Distance Threshold",
-        default=0.0001,
-        description="Maximum distance to consider faces overlapping"
-    )
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None or obj.type != 'MESH':
-            self.report({'WARNING'}, "Select a mesh object")
-            return {'CANCELLED'}
-
-        # Call the fast version
-        fix_overlapping_faces_fast(obj, self.threshold)
-        return {'FINISHED'}
 
 
 # --------------------------------------------------------------------
@@ -319,42 +306,6 @@ class MESH_OT_select_overlapping_faces(bpy.types.Operator):
         select_overlapping_faces_fast(obj, self.threshold)
         return {'FINISHED'}
 
-# --------------------------------------------------------------------
-# Operator: Fix overlapping vertices (bmesh version)
-# --------------------------------------------------------------------
-class MESH_OT_fix_overlapping_vertices(bpy.types.Operator):
-    bl_idname = "mesh.fix_overlapping_vertices"
-    bl_label = "Overlapping Verts"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    threshold: bpy.props.FloatProperty(
-        name="Distance Threshold",
-        default=0.0001,
-        description="Maximum distance to merge vertices"
-    )
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None or obj.type != 'MESH':
-            self.report({'WARNING'}, "Select a mesh object")
-            return {'CANCELLED'}
-
-        if context.mode != 'EDIT_MESH':
-            bpy.ops.object.mode_set(mode='EDIT')
-
-        me = obj.data
-        bm = bmesh.from_edit_mesh(me)
-        bm.verts.ensure_lookup_table()
-
-        # Merge vertices using bmesh method
-        bmesh.ops.remove_doubles(
-            bm,
-            verts=bm.verts,
-            dist=self.threshold
-        )
-
-        bmesh.update_edit_mesh(me)
-        return {'FINISHED'}
 
 # --------------------------------------------------------------------
 # Operator: Select Overlapping Vertices
@@ -583,6 +534,138 @@ def toggle_isolate_faces(context, face_type):
     context.scene.active_isolate = face_type
     return {'FINISHED'}
 
+# --------------------------------------------------------------------
+# Operator: Decimate (Planar)
+# --------------------------------------------------------------------
+class MESH_OT_add_decimate(bpy.types.Operator):
+    bl_idname = "mesh.add_planar_decimate"
+    bl_label = "Decimate"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    angle_limit: bpy.props.FloatProperty(
+        name="Angle",
+        default=1.0,
+        min=0.0,
+        max=30.0,
+        description="Planar Decimate angle limit"
+    )
+
+    def execute(self, context):
+        obj = context.object
+        if not obj or obj.type != "MESH":
+            self.report({'WARNING'}, "Select a mesh object")
+            return {'CANCELLED'}
+
+        if obj.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        # Remove existing DecimatePlanar modifier
+        for m in list(obj.modifiers):
+            if m.type == 'DECIMATE' and m.name == "DecimatePlanar":
+                obj.modifiers.remove(m)
+
+        # Add new Decimate modifier
+        dec = obj.modifiers.new(name="DecimatePlanar", type='DECIMATE')
+        dec.decimate_type = 'DISSOLVE'
+        dec.angle_limit = radians(self.angle_limit)
+        dec.delimit = {'NORMAL'}
+
+        # Make slider match new modifier
+        context.scene.decimate_angle_limit = self.angle_limit
+
+        self.report({'INFO'}, "DecimatePlanar added")
+        return {'FINISHED'}
+
+# --------------------------------------------------------------------
+# Operator: Cleanup
+# --------------------------------------------------------------------
+class MESH_OT_cleanup(bpy.types.Operator):
+    bl_idname = "mesh.cleanup_mesh"
+    bl_label = "Cleanup"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    threshold: bpy.props.FloatProperty(
+        name="Distance Threshold",
+        default=0.0001,
+        description="Threshold for merging overlapping vertices"
+    )
+
+    def execute(self, context):
+        obj = context.object
+        if obj is None or obj.type != 'MESH':
+            self.report({'WARNING'}, "Select a mesh object")
+            return {'CANCELLED'}
+
+        # Ensure edit mode
+        if context.mode != 'EDIT_MESH':
+            bpy.ops.object.mode_set(mode='EDIT')
+
+        me = obj.data
+        bm = bmesh.from_edit_mesh(me)
+
+        # ----------------------------
+        # 1. Merge overlapping vertices
+        # ----------------------------
+        bmesh.ops.remove_doubles(
+            bm,
+            verts=bm.verts,
+            dist=self.threshold
+        )
+
+        # ----------------------------
+        # 2. Remove overlapping faces
+        # ----------------------------
+        fix_overlapping_faces_fast(obj, self.threshold)
+
+        # ----------------------------
+        # 3. Delete loose vertices
+        # ----------------------------
+        loose_verts = [v for v in bm.verts if len(v.link_edges) == 0 and len(v.link_faces) == 0]
+        if loose_verts:
+            bmesh.ops.delete(bm, geom=loose_verts, context='VERTS')
+
+        # ----------------------------
+        # 4. Delete loose edges (no faces attached)
+        # ----------------------------
+        loose_edges = [e for e in bm.edges if len(e.link_faces) == 0]
+        if loose_edges:
+            bmesh.ops.delete(bm, geom=loose_edges, context='EDGES')
+
+        bmesh.update_edit_mesh(me)
+
+        # ----------------------------
+        # 5. Recalculate normals (outside)
+        # ----------------------------
+        bpy.ops.mesh.normals_make_consistent(inside=False)
+
+        self.report({'INFO'}, "Cleanup complete (Merged, removed duplicates, removed loose geo, normals fixed)")
+        return {'FINISHED'}
+
+
+# --------------------------------------------------------------------
+# Operator: Apply Decimate
+# --------------------------------------------------------------------
+class MESH_OT_apply_decimate(bpy.types.Operator):
+    bl_idname = "mesh.apply_planar_decimate"
+    bl_label = "Apply Decimate"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        obj = context.object
+        if not obj or obj.type != "MESH":
+            return {'CANCELLED'}
+
+        if obj.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        dec = obj.modifiers.get("DecimatePlanar")
+        if dec:
+            bpy.ops.object.modifier_apply(modifier=dec.name)
+        else:
+            self.report({'WARNING'}, "No DecimatePlanar modifier found")
+
+        return {'FINISHED'}
+
 
 # --------------------------------------------------------------------
 # Operator: Isolate Non-Manifold (toggle)
@@ -702,10 +785,20 @@ class VIEW3D_PT_gaming_toolkit(bpy.types.Panel):
         # ------------------------
         box = layout.box()
         box.label(text="Select", icon='RESTRICT_SELECT_ON')
-        box.operator("mesh.select_tris", text="Trangles")
+        box.operator("mesh.select_tris", text="Triangles")
         box.operator("mesh.select_ngons", text="nGons")
         box.operator("mesh.select_overlapping_vertices", text="Overlapping Verts")
         box.operator("mesh.select_overlapping_faces", text="Overlapping Faces")
+
+        # ------------------------
+        # Tris Quads
+        # ------------------------
+        box = layout.box()
+        box.label(text="Geometry", icon='MODIFIER')
+        box.operator("mesh.fix_triangulate", text="Triangulate")
+        box.operator("mesh.fix_tris_to_quads", text="Tris → Quads")
+        if context.mode == 'EDIT_MESH':
+            box.operator("mesh.edge_rotate_custom", text="Rotate Edge")
 
         # ------------------------
         # Fix Section
@@ -713,12 +806,28 @@ class VIEW3D_PT_gaming_toolkit(bpy.types.Panel):
         box = layout.box()
         box.label(text="Fix", icon='MODIFIER')
         box.operator("mesh.fix_ngone", text="nGons")
-        box.operator("mesh.fix_triangulate", text="Triangulate")
-        box.operator("mesh.fix_tris_to_quads", text="Tris → Quads")
-        box.operator("mesh.fix_overlapping_vertices", text="Overlapping Verts")
-        box.operator("mesh.fix_overlapping_faces", text="Overlapping Faces")
-        if context.mode == 'EDIT_MESH':
-            box.operator("mesh.edge_rotate_custom", text="Rotate Edge")
+        box.operator("mesh.cleanup_mesh", text="Cleanup")
+            
+        # ------------------------
+        # Decimate Section
+        # ------------------------
+        box = layout.box()
+        box.label(text="Decimate", icon='MODIFIER')
+
+        # Slider
+        box.prop(context.scene, "decimate_angle_limit", text="Angle Limit")
+
+        # Buttons always present
+        row = box.row()
+        row.operator("mesh.add_planar_decimate", text="Decimate (Planar)")
+        box.operator("mesh.apply_planar_decimate", text="Apply Decimate")
+
+        # Update modifier live if it exists
+        obj = context.object
+        if obj and obj.type == 'MESH':
+            dec = obj.modifiers.get("DecimatePlanar")
+            if dec:
+                dec.angle_limit = radians(context.scene.decimate_angle_limit)
 
 
 # --------------------------------------------------------------------
@@ -738,9 +847,10 @@ classes = (
     MESH_OT_select_tris,
     VIEW3D_PT_gaming_toolkit,
     MESH_OT_select_overlapping_vertices,
-    MESH_OT_fix_overlapping_vertices,
     MESH_OT_select_overlapping_faces,
-    MESH_OT_fix_overlapping_faces,
+    MESH_OT_add_decimate,
+    MESH_OT_apply_decimate,
+    MESH_OT_cleanup,
 )
 
 def register():
@@ -765,6 +875,15 @@ def register():
         default=(False, False, True)
     )
 
+    bpy.types.Scene.decimate_angle_limit = bpy.props.FloatProperty(
+        name="Angle",
+        default=1.0,
+        min=0.0,
+        max=30.0,
+        description="Planar Decimate angle limit",
+        update=update_decimate_angle
+    )
+    
 def unregister():
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
