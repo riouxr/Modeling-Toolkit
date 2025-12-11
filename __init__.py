@@ -263,13 +263,16 @@ def select_overlapping_faces_fast(obj, threshold=0.0001):
 # Helper: decimate slider
 # --------------------------------------------------------------------
 def update_decimate_angle(self, context):
-    obj = context.object
-    if not obj or obj.type != 'MESH':
-        return
-    dec = obj.modifiers.get("DecimatePlanar")
-    if dec:
-        from math import radians
-        dec.angle_limit = radians(context.scene.decimate_angle_limit)
+    angle = radians(context.scene.decimate_angle_limit)
+
+    # Loop through all selected objects
+    for obj in context.selected_objects:
+        if obj.type != 'MESH':
+            continue
+
+        dec = obj.modifiers.get("DecimatePlanar")
+        if dec:
+            dec.angle_limit = angle
 
 # --------------------------------------------------------------------
 # Helper: detect n-gons and select faces
@@ -551,30 +554,34 @@ class MESH_OT_add_decimate(bpy.types.Operator):
     )
 
     def execute(self, context):
-        obj = context.object
-        if not obj or obj.type != "MESH":
-            self.report({'WARNING'}, "Select a mesh object")
-            return {'CANCELLED'}
 
-        if obj.mode != 'OBJECT':
+        # Must be in OBJECT mode
+        if context.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
 
-        # Remove existing DecimatePlanar modifier
-        for m in list(obj.modifiers):
-            if m.type == 'DECIMATE' and m.name == "DecimatePlanar":
-                obj.modifiers.remove(m)
+        angle = radians(self.angle_limit)
 
-        # Add new Decimate modifier
-        dec = obj.modifiers.new(name="DecimatePlanar", type='DECIMATE')
-        dec.decimate_type = 'DISSOLVE'
-        dec.angle_limit = radians(self.angle_limit)
-        dec.delimit = {'NORMAL'}
+        for obj in context.selected_objects:
+            if obj.type != "MESH":
+                continue
 
-        # Make slider match new modifier
+            # Remove old modifier if present
+            for m in list(obj.modifiers):
+                if m.type == 'DECIMATE' and m.name == "DecimatePlanar":
+                    obj.modifiers.remove(m)
+
+            # Add new decimate modifier
+            dec = obj.modifiers.new(name="DecimatePlanar", type='DECIMATE')
+            dec.decimate_type = 'DISSOLVE'
+            dec.angle_limit = angle
+            dec.delimit = {'NORMAL'}
+
+        # Sync UI slider for next use
         context.scene.decimate_angle_limit = self.angle_limit
 
-        self.report({'INFO'}, "DecimatePlanar added")
+        self.report({'INFO'}, "Decimate added to selected objects")
         return {'FINISHED'}
+
 
 # --------------------------------------------------------------------
 # Operator: Cleanup
@@ -663,21 +670,22 @@ class MESH_OT_apply_decimate(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        obj = context.object
-        if not obj or obj.type != "MESH":
-            return {'CANCELLED'}
 
-        if obj.mode != 'OBJECT':
+        if context.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
 
-        dec = obj.modifiers.get("DecimatePlanar")
-        if dec:
-            bpy.ops.object.modifier_apply(modifier=dec.name)
-        else:
-            self.report({'WARNING'}, "No DecimatePlanar modifier found")
+        for obj in context.selected_objects:
+            if obj.type != "MESH":
+                continue
+
+            dec = obj.modifiers.get("DecimatePlanar")
+            if dec:
+                try:
+                    bpy.ops.object.modifier_apply(modifier=dec.name)
+                except Exception as e:
+                    self.report({'WARNING'}, f"Could not apply decimate on {obj.name}")
 
         return {'FINISHED'}
-
 
 # --------------------------------------------------------------------
 # Operator: Isolate Non-Manifold (toggle)
@@ -834,12 +842,7 @@ class VIEW3D_PT_gaming_toolkit(bpy.types.Panel):
         row.operator("mesh.add_planar_decimate", text="Decimate (Planar)")
         box.operator("mesh.apply_planar_decimate", text="Apply Decimate")
 
-        # Update modifier live if it exists
-        obj = context.object
-        if obj and obj.type == 'MESH':
-            dec = obj.modifiers.get("DecimatePlanar")
-            if dec:
-                dec.angle_limit = radians(context.scene.decimate_angle_limit)
+
 
 
 # --------------------------------------------------------------------
