@@ -1,918 +1,352 @@
 bl_info = {
-    "name": "BB Modeling toolkit",
-    "category": "Mesh",
-    "author": "Blender Bob",
-    "version": (3, 0),
-    "blender": (4, 5, 0),
-    "location": "View3D > N panel > Modeling toolkit",
-    "description": "Most used tools when modeling for gaming",
+    "name": "Convert to Gaming",
+    "author": "Your Name",
+    "version": (1, 3),
+    "blender": (2, 80, 0),
+    "location": "View3D > UI > Tool",
+    "description": "Converts high-poly objects to low-poly for gaming",
+    "category": "Object",
 }
 
 import bpy
 import bmesh
-from mathutils import Vector
-from math import radians
-
-# --------------------------------------------------------------------
-# Helper: Concave faces
-# --------------------------------------------------------------------
-def is_concave(f):
-    # A face is concave if the polygon formed by its vertices is not convex
-    verts = [v.co for v in f.verts]
-    if len(verts) < 4:
-        return False  # Triangles and quads are convex by definition
-    
-    # Compute center
-    center = sum(verts, Vector((0,0,0))) / len(verts)
-    
-    # Get normal
-    normal = f.normal
-    
-    # Find basis vectors u, v perpendicular to normal
-    arb = Vector((1,0,0)) if abs(normal.x) < 0.5 else Vector((0,1,0))
-    u = normal.cross(arb).normalized()
-    v = normal.cross(u).normalized()
-    
-    # Project vertices to 2D plane
-    points_2d = [((vert - center).dot(u), (vert - center).dot(v)) for vert in verts]
-    
-    # 2D cross product helper
-    def cross2d(p1, p2, p3):
-        a_x = p2[0] - p1[0]
-        a_y = p2[1] - p1[1]
-        b_x = p3[0] - p2[0]
-        b_y = p3[1] - p2[1]
-        return a_x * b_y - a_y * b_x
-    
-    # Compute signs of turns
-    signs = []
-    n = len(points_2d)
-    for i in range(n):
-        c = cross2d(points_2d[i], points_2d[(i+1)%n], points_2d[(i+2)%n])
-        signs.append(c)
-    
-    # If signs are not all positive or all negative, face is concave
-    all_pos = all(s >= 0 for s in signs)
-    all_neg = all(s <= 0 for s in signs)
-    return not (all_pos or all_neg)
-
-# --------------------------------------------------------------------
-# Helper: Ensure Edit Mode
-# --------------------------------------------------------------------
-def ensure_edit_mode(obj, select_mode=(True, False, False)):
-    """Ensure object is in EDIT mode and selection type is set.
-       select_mode is a tuple: (vertex, edge, face)"""
-    if obj.mode != 'EDIT':
-        bpy.ops.object.mode_set(mode='EDIT')
-    bpy.context.tool_settings.mesh_select_mode = select_mode
-
-# --------------------------------------------------------------------
-# Helper: Select triangles
-# --------------------------------------------------------------------
-def select_tris(obj):
-    ensure_edit_mode(obj, select_mode=(False, False, True))  # Face select
-    bm = bmesh.from_edit_mesh(obj.data)
-    bm.faces.ensure_lookup_table()
-    for f in bm.faces:
-        f.select = len(f.verts) == 3
-    bmesh.update_edit_mesh(obj.data)
-
-# --------------------------------------------------------------------
-# Helper: Merge overlapping vertices
-# --------------------------------------------------------------------
-def merge_overlapping_vertices(obj, threshold=0.0001):
-    if bpy.context.mode != 'EDIT_MESH':
-        bpy.ops.object.mode_set(mode='EDIT')
-    
-    bpy.ops.mesh.select_all(action='DESELECT')
-    
-    bm = bmesh.from_edit_mesh(obj.data)
-    bm.verts.ensure_lookup_table()
-    
-    # Select overlapping verts
-    for i, v1 in enumerate(bm.verts):
-        for j in range(i + 1, len(bm.verts)):
-            v2 = bm.verts[j]
-            if (v1.co - v2.co).length <= threshold:
-                v1.select = True
-                v2.select = True
-    
-    bmesh.update_edit_mesh(obj.data)
-    
-    # Merge selected vertices by distance
-    bpy.ops.mesh.remove_doubles(threshold=threshold)
-
-# --------------------------------------------------------------------
-# Helper: Select overlapping vertices
-# --------------------------------------------------------------------
-def select_overlapping_vertices(obj, threshold=0.0001):
-    ensure_edit_mode(obj, select_mode=(True, False, False))  # Vertex select
-
-    bm = bmesh.from_edit_mesh(obj.data)
-    bm.verts.ensure_lookup_table()
-
-    # Deselect all
-    for v in bm.verts:
-        v.select = False
-
-    # Compare vertices positions
-    seen = {}
-    for v in bm.verts:
-        key = (round(v.co.x / threshold), round(v.co.y / threshold), round(v.co.z / threshold))
-        if key in seen:
-            v.select = True
-            seen[key].select = True
-        else:
-            seen[key] = v
-
-    bmesh.update_edit_mesh(obj.data)
-
-# --------------------------------------------------------------------
-# Helper: Find overlapping faces
-# --------------------------------------------------------------------
-def select_overlapping_faces_fast(obj, threshold=0.0001):
-    ensure_edit_mode(obj, select_mode=(False, False, True))  # Face select
-
-    bm = bmesh.from_edit_mesh(obj.data)
-    bm.faces.ensure_lookup_table()
-
-    for f in bm.faces:
-        f.select = False
-
-    factor = 1 / threshold
-    face_dict = {}
-
-    for f in bm.faces:
-        key = tuple(sorted((round(v.co.x * factor), round(v.co.y * factor), round(v.co.z * factor)) for v in f.verts))
-        if key in face_dict:
-            f.select = True
-            face_dict[key].select = True  # select the first face too
-        else:
-            face_dict[key] = f
-
-    bmesh.update_edit_mesh(obj.data)
-
-
-# --------------------------------------------------------------------
-# Helper: Select non-manifold
-# --------------------------------------------------------------------
-def select_non_manifold_full(obj):
-    if obj is None or obj.type != 'MESH':
-        return
-    
-    if bpy.context.mode != 'EDIT_MESH':
-        bpy.ops.object.mode_set(mode='EDIT')
-    
-    me = obj.data
-    bm = bmesh.from_edit_mesh(me)
-    
-    # Deselect all first
-    for v in bm.verts:
-        v.select = False
-    for e in bm.edges:
-        e.select = False
-    for f in bm.faces:
-        f.select = False
-    
-    # Detect non-manifold edges
-    non_manifold_edges = [e for e in bm.edges if len(e.link_faces) != 2]
-    for e in non_manifold_edges:
-        e.select = True
-        for v in e.verts:
-            v.select = True
-    
-    # Detect loose vertices (no faces)
-    loose_verts = [v for v in bm.verts if len(v.link_faces) == 0]
-    for v in loose_verts:
-        v.select = True
-    
-    bmesh.update_edit_mesh(me)
-    
-    # Switch to vertex select mode so selected verts are visible
-    bpy.context.tool_settings.mesh_select_mode = (True, False, False)
-
-
-
-# --------------------------------------------------------------------
-# Helper: Delete overlapping faces (keep one)
-# --------------------------------------------------------------------
-def fix_overlapping_faces_fast(obj, threshold=0.0001):
-    if bpy.context.mode != 'EDIT_MESH':
-        bpy.ops.object.mode_set(mode='EDIT')
-
-    me = obj.data
-    bm = bmesh.from_edit_mesh(me)
-    bm.faces.ensure_lookup_table()
-
-    # Dictionary to track unique faces by their rounded vertex coordinates
-    face_dict = {}
-    factor = 1 / threshold  # scale factor for rounding
-
-    faces_to_delete = []
-
-    for f in bm.faces:
-        # Create a key based on rounded vertex positions
-        key = tuple(sorted(
-            (round(v.co.x * factor), round(v.co.y * factor), round(v.co.z * factor)) for v in f.verts
-        ))
-
-        if key in face_dict:
-            # Duplicate face found → mark for deletion
-            faces_to_delete.append(f)
-        else:
-            # First occurrence → store in dictionary
-            face_dict[key] = f
-
-    # Delete all duplicates in one operation
-    if faces_to_delete:
-        bmesh.ops.delete(bm, geom=faces_to_delete, context='FACES')
-
-    bmesh.update_edit_mesh(me)
-
-# --------------------------------------------------------------------
-# Helper: Select overlapping faces (fast)
-# --------------------------------------------------------------------
-def select_overlapping_faces_fast(obj, threshold=0.0001):
-    if bpy.context.mode != 'EDIT_MESH':
-        bpy.ops.object.mode_set(mode='EDIT')
-
-    me = obj.data
-    bm = bmesh.from_edit_mesh(me)
-    bm.faces.ensure_lookup_table()
-
-    # Deselect all faces first
-    for f in bm.faces:
-        f.select = False
-
-    # Dictionary to track faces by their rounded vertex coordinates
-    face_dict = {}         # <-- initialize this BEFORE using it
-    factor = 1 / threshold # scale factor for rounding
-
-    for f in bm.faces:
-        # Create a hashable key: tuple of sorted rounded vertex coords
-        key = tuple(sorted((round(v.co.x * factor), round(v.co.y * factor), round(v.co.z * factor)) for v in f.verts))
-        if key in face_dict:
-            f.select = True                # select current face
-            face_dict[key].select = True   # select the first face too
-        else:
-            face_dict[key] = f
-
-    bmesh.update_edit_mesh(me)
-
-# --------------------------------------------------------------------
-# Helper: decimate slider
-# --------------------------------------------------------------------
-def update_decimate_angle(self, context):
-    angle = radians(context.scene.decimate_angle_limit)
-
-    # Loop through all selected objects
-    for obj in context.selected_objects:
-        if obj.type != 'MESH':
-            continue
-
-        dec = obj.modifiers.get("DecimatePlanar")
-        if dec:
-            dec.angle_limit = angle
-
-# --------------------------------------------------------------------
-# Helper: detect n-gons and select faces
-# --------------------------------------------------------------------
-def select_ngons(obj):
-    ensure_edit_mode(obj, select_mode=(False, False, True))  # Face select
-    bm = bmesh.from_edit_mesh(obj.data)
-    bm.faces.ensure_lookup_table()
-    for f in bm.faces:
-        f.select = len(f.verts) > 4
-    bmesh.update_edit_mesh(obj.data)
-
-
-# --------------------------------------------------------------------
-# Operator: Select Overlapping Faces
-# --------------------------------------------------------------------
-class MESH_OT_select_overlapping_faces(bpy.types.Operator):
-    bl_idname = "mesh.select_overlapping_faces"
-    bl_label = "Select Overlapping Faces"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    threshold: bpy.props.FloatProperty(
-        name="Distance Threshold",
-        default=0.0001,
-        description="Maximum distance to consider faces overlapping"
-    )
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None or obj.type != 'MESH':
-            self.report({'WARNING'}, "Select a mesh object")
-            return {'CANCELLED'}
-
-        select_overlapping_faces_fast(obj, self.threshold)
-        return {'FINISHED'}
-
-
-# --------------------------------------------------------------------
-# Operator: Select Overlapping Vertices
-# --------------------------------------------------------------------
-class MESH_OT_select_overlapping_vertices(bpy.types.Operator):
-    bl_idname = "mesh.select_overlapping_vertices"
-    bl_label = "Select Overlapping Verts"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    threshold: bpy.props.FloatProperty(
-        name="Distance Threshold",
-        default=0.0001,
-        description="Distance to consider vertices overlapping"
-    )
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None or obj.type != 'MESH':
-            self.report({'WARNING'}, "Select a mesh object")
-            return {'CANCELLED'}
-        select_overlapping_vertices(obj, self.threshold)
-        return {'FINISHED'}
-
-
-# --------------------------------------------------------------------
-# Operator: Select Triangles
-# --------------------------------------------------------------------
-class MESH_OT_select_tris(bpy.types.Operator):
-    bl_idname = "mesh.select_tris"
-    bl_label = "Select Tris"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None or obj.type != 'MESH':
-            self.report({'WARNING'}, "Select a mesh object")
-            return {'CANCELLED'}
-        select_tris(obj)
-        return {'FINISHED'}    
-
-# --------------------------------------------------------------------
-# Operator: Select n-gons
-# --------------------------------------------------------------------
-class MESH_OT_select_ngons(bpy.types.Operator):
-    bl_idname = "mesh.select_ngons"
-    bl_label = "Select nGons"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None or obj.type != 'MESH':
-            self.report({'WARNING'}, "Select a mesh object")
-            return {'CANCELLED'}
-        select_ngons(obj)
-        return {'FINISHED'}
-
-# --------------------------------------------------------------------
-# Operator: Revert View (unhide all)
-# --------------------------------------------------------------------
-class MESH_OT_revert_view(bpy.types.Operator):
-    bl_idname = "mesh.revert_view"
-    bl_label = "Revert View"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None or obj.type != 'MESH':
-            return {'CANCELLED'}
-
-        if context.mode != 'EDIT_MESH':
-            bpy.ops.object.mode_set(mode='EDIT')
-
-        bpy.ops.mesh.reveal()
-        bpy.ops.mesh.select_all(action='DESELECT')
-
-        return {'FINISHED'}
-
-# --------------------------------------------------------------------
-# Operator: Fix nGones
-# --------------------------------------------------------------------
-class MESH_OT_fix_ngone(bpy.types.Operator):
-    bl_idname = "mesh.fix_ngone"
-    bl_label = "Fix nGons"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None or obj.type != 'MESH':
-            self.report({'WARNING'}, "Select a mesh object")
-            return {'CANCELLED'}
-
-        if context.mode != 'EDIT_MESH':
-            bpy.ops.object.mode_set(mode='EDIT')
-
-        # Select only n-gons
-        select_ngons(obj)
-
-        # Convert selected n-gons to tris and back to quads
-        bpy.ops.mesh.quads_convert_to_tris()
-        bpy.ops.mesh.tris_convert_to_quads()
-        return {'FINISHED'}
-
-# --------------------------------------------------------------------
-# Operator: Triangulate
-# --------------------------------------------------------------------
-class MESH_OT_triangulate(bpy.types.Operator):
-    bl_idname = "mesh.fix_triangulate"
-    bl_label = "Triangulate"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None or obj.type != 'MESH':
-            return {'CANCELLED'}
-
-        if context.mode == 'EDIT_MESH':
-            bpy.ops.mesh.quads_convert_to_tris()
-        else:
-            bpy.ops.object.mode_set(mode='EDIT')
-            bpy.ops.mesh.select_all(action='SELECT')
-            bpy.ops.mesh.quads_convert_to_tris()
-            bpy.ops.object.mode_set(mode='OBJECT')
-        return {'FINISHED'}
-
-# --------------------------------------------------------------------
-# Operator: Tris → Quads
-# --------------------------------------------------------------------
-class MESH_OT_tris_to_quads(bpy.types.Operator):
-    bl_idname = "mesh.fix_tris_to_quads"
-    bl_label = "Tris to Quads"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None or obj.type != 'MESH':
-            return {'CANCELLED'}
-
-        if context.mode == 'EDIT_MESH':
-            bpy.ops.mesh.tris_convert_to_quads()
-        else:
-            bpy.ops.object.mode_set(mode='EDIT')
-            bpy.ops.mesh.select_all(action='SELECT')
-            bpy.ops.mesh.tris_convert_to_quads()
-            bpy.ops.object.mode_set(mode='OBJECT')
-        return {'FINISHED'}
-
-# --------------------------------------------------------------------
-# Operator: Rotate edges (single button)
-# --------------------------------------------------------------------
-class MESH_OT_edge_rotate(bpy.types.Operator):
-    bl_idname = "mesh.edge_rotate_custom"
-    bl_label = "Rotate Edge"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        bpy.ops.mesh.edge_rotate(use_ccw=True)
-        return {'FINISHED'}
-
-# --------------------------------------------------------------------
-# Helper: Toggle isolate faces (add concave)
-# --------------------------------------------------------------------
-def toggle_isolate_faces(context, face_type):
-    obj = context.object
-    if obj is None or obj.type != 'MESH':
-        return {'CANCELLED'}
-
-    if context.mode != 'EDIT_MESH':
-        bpy.ops.object.mode_set(mode='EDIT')
-
-    bm = bmesh.from_edit_mesh(obj.data)
-    bm.faces.ensure_lookup_table()
-
-    current = context.scene.active_isolate if hasattr(context.scene, "active_isolate") else None
-    any_hidden = any(f.hide for f in bm.faces)
-
-    if current == face_type:
-        # Same isolate clicked → revert
-        bpy.ops.mesh.reveal()
-        bpy.ops.mesh.select_all(action='DESELECT')
-        context.space_data.shading.type = context.scene.original_shading
-        context.tool_settings.mesh_select_mode = context.scene.original_select_mode
-        context.scene.active_isolate = ""
-        return {'FINISHED'}
-
-    if current or any_hidden:
-        # Different isolate clicked or hidden → revert first
-        bpy.ops.mesh.reveal()
-        bpy.ops.mesh.select_all(action='DESELECT')
-
-    # Store originals if starting new isolate
-    context.scene.original_shading = context.space_data.shading.type
-    context.scene.original_select_mode = context.tool_settings.mesh_select_mode[:]
-
-    # Set to face select mode
-    context.tool_settings.mesh_select_mode = (False, False, True)
-
-    # Select new faces
-    for f in bm.faces:
-        f.select = False
-
-    if face_type == "NGONS":
-        for f in bm.faces:
-            f.select = len(f.verts) > 4
-    elif face_type == "TRIS":
-        for f in bm.faces:
-            f.select = len(f.verts) == 3
-    elif face_type == "NON_MANIFOLD":
-        for f in bm.faces:
-            f.select = any(not e.is_manifold for e in f.edges)
-    elif face_type == "CONCAVE":
-        for f in bm.faces:
-            f.select = is_concave(f)
-
-    bmesh.update_edit_mesh(obj.data)
-
-    # Hide unselected only if not showing wireframe
-    if not context.scene.show_wire_isolate:
-        bpy.ops.mesh.hide(unselected=True)
-
-    # Set shading
-    if context.scene.show_wire_isolate:
-        context.space_data.shading.type = 'WIREFRAME'
+from math import radians, pi
+
+HIGH_COLL = "High"
+LOW_COLL = "Low"
+
+# ---------------------------------------------------
+# Helpers (with prints)
+# ---------------------------------------------------
+
+def ensure_collection(name):
+    col = bpy.data.collections.get(name)
+    if not col:
+        print(f"[COLLECTION] Creating collection '{name}'")
+        col = bpy.data.collections.new(name)
+        bpy.context.scene.collection.children.link(col)
     else:
-        context.space_data.shading.type = 'SOLID'
+        print(f"[COLLECTION] Found collection '{name}'")
+    return col
 
-    context.scene.active_isolate = face_type
-    return {'FINISHED'}
+def select_only(obj):
+    # ensure object mode
+    if bpy.context.view_layer.objects.active and bpy.context.view_layer.objects.active.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
 
-# --------------------------------------------------------------------
-# Operator: Decimate (Planar)
-# --------------------------------------------------------------------
-class MESH_OT_add_decimate(bpy.types.Operator):
-    bl_idname = "mesh.add_planar_decimate"
-    bl_label = "Decimate"
-    bl_options = {'REGISTER', 'UNDO'}
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
 
-    angle_limit: bpy.props.FloatProperty(
-        name="Angle",
-        default=1.0,
-        min=0.0,
-        max=30.0,
-        description="Planar Decimate angle limit"
-    )
+def apply_modifier_safe(obj, mod_name):
+    select_only(obj)
+    try:
+        bpy.ops.object.modifier_apply(modifier=mod_name)
+        print(f"    [APPLY] Successfully applied modifier '{mod_name}' on '{obj.name}'")
+        return True
+    except Exception as e:
+        print(f"    [APPLY] Failed to apply modifier '{mod_name}' on '{obj.name}': {e}")
+        return False
 
-    def execute(self, context):
+# safe remove that logs
+def remove_modifier_safe(obj, m):
+    # store name and type first
+    mod_name = m.name
+    mod_type = m.type
+    try:
+        obj.modifiers.remove(m)
+        print(f"    [REMOVE] Removed modifier '{mod_name}' (type={mod_type}) from '{obj.name}'")
+        return True
+    except Exception as e:
+        print(f"    [REMOVE] Failed to remove modifier '{mod_name}' on '{obj.name}': {e}")
+        return False
 
-        # Must be in OBJECT mode
-        if context.mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode='OBJECT')
+# ---------------------------------------------------
+# Processing for each Low object - Part 1: Prep modifiers without applying decimate
+# ---------------------------------------------------
 
-        angle = radians(self.angle_limit)
+def process_low_prep(obj):
+    print(f"\n=== Prepping object: '{obj.name}' ===")
 
-        for obj in context.selected_objects:
-            if obj.type != "MESH":
-                continue
+    # Rename
+    original_name = obj.name
+    if not obj.name.endswith("_low"):
+        obj.name = obj.name + "_low"
+        print(f"[RENAME] '{original_name}' -> '{obj.name}'")
+    else:
+        print(f"[RENAME] Already named '{obj.name}'")
 
-            # Remove old modifier if present
-            for m in list(obj.modifiers):
-                if m.type == 'DECIMATE' and m.name == "DecimatePlanar":
-                    obj.modifiers.remove(m)
+    # Print current modifiers
+    mods_before = [(m.name, m.type) for m in obj.modifiers]
+    print(f"[MODS] Before: {mods_before if mods_before else 'None'}")
 
-            # Add new decimate modifier
-            dec = obj.modifiers.new(name="DecimatePlanar", type='DECIMATE')
-            dec.decimate_type = 'DISSOLVE'
-            dec.angle_limit = angle
-            dec.delimit = {'NORMAL'}
+    # Remove Subsurf + Smooth
+    for m in list(obj.modifiers):
+        if m.type in {"SUBSURF", "SMOOTH"}:
+            remove_modifier_safe(obj, m)
 
-        # Sync UI slider for next use
-        context.scene.decimate_angle_limit = self.angle_limit
+    # Show modifiers after removing subsurf/smooth
+    mods_mid = [(m.name, m.type) for m in obj.modifiers]
+    print(f"[MODS] After removing Subsurf/Smooth: {mods_mid if mods_mid else 'None'}")
 
-        self.report({'INFO'}, "Decimate added to selected objects")
-        return {'FINISHED'}
+    # Apply Mirror + Bevel
+    for m in list(obj.modifiers):
+        if m.type in {"MIRROR", "BEVEL"}:
+            mod_name = m.name
+            print(f"    [APPLY_REQUEST] Applying {m.type} '{mod_name}' on '{obj.name}'")
+            applied = apply_modifier_safe(obj, mod_name)
+            if not applied:
+                print(f"    [APPLY_REQUEST] Could not apply '{mod_name}' — continuing")
 
+    # Show modifiers after applying Mirror+Bevel
+    mods_after_apply = [(m.name, m.type) for m in obj.modifiers]
+    print(f"[MODS] After applying Mirror/Bevel: {mods_after_apply if mods_after_apply else 'None'}")
 
-# --------------------------------------------------------------------
-# Operator: Cleanup
-# --------------------------------------------------------------------
-class MESH_OT_cleanup(bpy.types.Operator):
-    bl_idname = "mesh.cleanup_mesh"
-    bl_label = "Cleanup"
-    bl_options = {'REGISTER', 'UNDO'}
+    # Remove ANY existing Decimate modifiers
+    decs = [m for m in list(obj.modifiers) if m.type == 'DECIMATE']
+    if decs:
+        print(f"[DECI] Found existing DECIMATE modifiers: {[(d.name, d.decimate_type if hasattr(d, 'decimate_type') else 'N/A') for d in decs]}")
+    for m in decs:
+        remove_modifier_safe(obj, m)
 
-    threshold: bpy.props.FloatProperty(
-        name="Distance Threshold",
-        default=0.0001,
-        description="Threshold for merging overlapping vertices"
-    )
+    # Add fresh Planar Decimate (using 'DISSOLVE' for Blender 4.1+)
+    dec = None
+    try:
+        dec = obj.modifiers.new(name="DecimatePlanar", type="DECIMATE")
+        dec.decimate_type = 'DISSOLVE'
+        dec.angle_limit = radians(0.5)
+        dec.delimit = {'NORMAL'}
+        print(f"[DECI] Added new DISSOLVE (Planar) decimate 'DecimatePlanar' on '{obj.name}' with angle_limit=0.5° and delimit=Normal")
+    except Exception as e:
+        print(f"[DECI] Failed to add/set DISSOLVE decimate on '{obj.name}': {e}")
+        dec = None
 
-    def execute(self, context):
-        obj = context.object
-        if obj is None or obj.type != 'MESH':
-            self.report({'WARNING'}, "Select a mesh object")
-            return {'CANCELLED'}
+    # Do NOT apply here
 
-        # Ensure edit mode
-        if context.mode != 'EDIT_MESH':
-            bpy.ops.object.mode_set(mode='EDIT')
+    # Final modifiers list after prep
+    mods_final = [(m.name, m.type) for m in obj.modifiers]
+    print(f"[MODS] Modifiers after prep on '{obj.name}': {mods_final if mods_final else 'None'}")
 
-        me = obj.data
-        bm = bmesh.from_edit_mesh(me)
+# ---------------------------------------------------
+# Processing for each Low object - Part 2: Apply decimate
+# ---------------------------------------------------
 
-        # ----------------------------
-        # 1. Merge overlapping vertices
-        # ----------------------------
-        bmesh.ops.remove_doubles(
-            bm,
-            verts=bm.verts,
-            dist=self.threshold
-        )
+def process_low_apply_decimate(obj):
+    print(f"\n=== Applying decimate on object: '{obj.name}' ===")
 
-        # ----------------------------
-        # 2. Remove overlapping faces
-        # ----------------------------
-        fix_overlapping_faces_fast(obj, self.threshold)
+    # Find and apply the decimate modifier
+    dec_mod = None
+    for m in obj.modifiers:
+        if m.type == 'DECIMATE' and m.decimate_type == 'DISSOLVE':
+            dec_mod = m
+            break
 
-        # ----------------------------
-        # 3. Delete loose vertices
-        # ----------------------------
-        loose_verts = [v for v in bm.verts if len(v.link_edges) == 0 and len(v.link_faces) == 0]
-        if loose_verts:
-            bmesh.ops.delete(bm, geom=loose_verts, context='VERTS')
+    if dec_mod:
+        apply_modifier_safe(obj, dec_mod.name)
+    else:
+        print(f"[DECI] No DISSOLVE decimate modifier found on '{obj.name}' to apply")
 
-        # ----------------------------
-        # 4. Delete loose edges
-        # ----------------------------
-        loose_edges = [e for e in bm.edges if len(e.link_faces) == 0]
-        if loose_edges:
-            bmesh.ops.delete(bm, geom=loose_edges, context='EDGES')
+    # Final modifiers list after apply
+    mods_final = [(m.name, m.type) for m in obj.modifiers]
+    print(f"[MODS] Modifiers after applying decimate on '{obj.name}': {mods_final if mods_final else 'None'}")
 
-        bmesh.update_edit_mesh(me)
+# ---------------------------------------------------
+# Geometry Operations: Select Ngons > 5 edges (with logging)
+# ---------------------------------------------------
 
-        # ----------------------------
-        # 5. Recalculate normals (requires selecting all faces)
-        # ----------------------------
-        # Save current selection mode
-        prev_mode = context.tool_settings.mesh_select_mode[:]
+def edit_triangulate_to_quads(obj):
 
-        # Switch to face mode
-        context.tool_settings.mesh_select_mode = (False, False, True)
+    if obj.type != 'MESH':
+        print(f"[GEOM] Skipping '{obj.name}' (not a mesh)")
+        return
 
-        # Select all faces
+    print(f"[GEOM] Starting geometry ops on '{obj.name}'")
+    select_only(obj)
+    try:
+        bpy.ops.object.mode_set(mode='EDIT')
+    except Exception as e:
+        print(f"    [GEOM] Failed to enter EDIT mode for '{obj.name}': {e}")
+        return
+
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+
+    # Deselect all faces
+    for f in bm.faces:
+        f.select = False
+
+    # Select ngons with > 5 verts
+    ngons = [f for f in bm.faces if len(f.verts) > 5]
+    print(f"    [GEOM] Found {len(ngons)} ngon(s) (>5 edges) in '{obj.name}'")
+    for f in ngons:
+        f.select = True
+
+    bmesh.update_edit_mesh(obj.data)
+
+    # Triangulate selected ngons using bmesh
+    bm = bmesh.from_edit_mesh(obj.data)
+    sel_faces = [f for f in bm.faces if f.select]
+    if sel_faces:
+        try:
+            bmesh.ops.triangulate(
+                bm,
+                faces=sel_faces,
+                quad_method='BEAUTY',
+                ngon_method='BEAUTY'
+            )
+            print(f"    [GEOM] Triangulated {len(sel_faces)} selected face(s) on '{obj.name}'")
+        except Exception as e:
+            print(f"    [GEOM] bmesh triangulate failed on '{obj.name}': {e}")
+    else:
+        print(f"    [GEOM] No selected faces to triangulate on '{obj.name}'")
+
+    bmesh.update_edit_mesh(obj.data)
+
+    # Select all faces for tris to quads
+    try:
         bpy.ops.mesh.select_all(action='SELECT')
+        print(f"    [GEOM] Selected all faces for tris_convert_to_quads on '{obj.name}'")
+    except Exception as e:
+        print(f"    [GEOM] Failed to select all on '{obj.name}': {e}")
 
-        # Recalculate normals
-        bpy.ops.mesh.normals_make_consistent(inside=False)
+    # Convert tris -> quads where possible, with relaxed thresholds and no limits
+    try:
+        bpy.ops.mesh.tris_convert_to_quads(
+            face_threshold=pi,
+            shape_threshold=pi,
+            uvs=False,
+            vcols=False,
+            seam=False,
+            sharp=False,
+            materials=False
+        )
+        print(f"    [GEOM] Ran tris_convert_to_quads on '{obj.name}' with relaxed parameters")
+    except Exception as e:
+        print(f"    [GEOM] tris_convert_to_quads failed on '{obj.name}': {e}")
 
-        # Restore selection mode
-        context.tool_settings.mesh_select_mode = prev_mode
+    try:
+        bpy.ops.object.mode_set(mode='OBJECT')
+    except Exception as e:
+        print(f"    [GEOM] Failed to exit EDIT mode for '{obj.name}': {e}")
 
-        self.report({'INFO'}, "Cleanup complete (Merged, removed duplicates/loose geo, normals fixed)")
-        return {'FINISHED'}
+# ---------------------------------------------------
+# Main for Convert: Dupe, prep modifiers, hide high
+# ---------------------------------------------------
 
-# --------------------------------------------------------------------
-# Operator: Apply Decimate
-# --------------------------------------------------------------------
-class MESH_OT_apply_decimate(bpy.types.Operator):
-    bl_idname = "mesh.apply_planar_decimate"
-    bl_label = "Apply Decimate"
-    bl_options = {'REGISTER', 'UNDO'}
+def convert_main():
+    print("=== Convert started ===")
+    high = bpy.data.collections.get(HIGH_COLL)
+    if not high:
+        print(f"[ERROR] High collection '{HIGH_COLL}' not found. Aborting.")
+        return
+    else:
+        print(f"[FOUND] High collection '{HIGH_COLL}' has {len(high.objects)} object(s).")
 
-    def execute(self, context):
+    low = ensure_collection(LOW_COLL)
 
-        # Must be in OBJECT mode to apply modifiers
-        if context.mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode='OBJECT')
-
-        # Apply decimate on all selected mesh objects
-        for obj in context.selected_objects:
-            if obj.type != "MESH":
-                continue
-
-            dec = obj.modifiers.get("DecimatePlanar")
-
-            if dec:
-                # Switch active object (Blender requires it for modifier_apply)
-                context.view_layer.objects.active = obj
-
+    # Duplicate objects from High → Low
+    new_objects = []
+    for src in high.objects:
+        print(f"[DUP] Duplicating '{src.name}'...")
+        try:
+            new_obj = src.copy()
+            if src.data:
                 try:
-                    bpy.ops.object.modifier_apply(modifier=dec.name)
+                    new_obj.data = src.data.copy()
+                    print(f"    [DUP] Copied mesh/data for '{src.name}'")
                 except Exception as e:
-                    self.report({'WARNING'}, f"Could not apply decimate on {obj.name}")
+                    new_obj.data = src.data
+                    print(f"    [DUP] Could not copy data for '{src.name}', linked instead: {e}")
+            low.objects.link(new_obj)
+            new_objects.append(new_obj)
+            print(f"    [DUP] Linked duplicate '{new_obj.name}' into '{LOW_COLL}'")
+        except Exception as e:
+            print(f"    [DUP] Failed to duplicate '{src.name}': {e}")
 
+    print(f"[DUP] Completed duplication. {len(new_objects)} new object(s) in '{LOW_COLL}'.")
+
+    # Prep modifiers on Low objects (without applying decimate)
+    for obj in new_objects:
+        process_low_prep(obj)
+
+    # Make High collection invisible
+    try:
+        high.hide_viewport = True
+        print(f"[HIDE] Set '{HIGH_COLL}' collection to invisible in viewport")
+    except Exception as e:
+        print(f"[HIDE] Failed to hide '{HIGH_COLL}': {e}")
+
+    print("=== Convert finished ===")
+
+# ---------------------------------------------------
+# Main for Fix nGones: Apply decimate, geometry ops
+# ---------------------------------------------------
+
+def fix_ngons_main():
+    print("=== Fix nGones started ===")
+    low = bpy.data.collections.get(LOW_COLL)
+    if not low:
+        print(f"[ERROR] Low collection '{LOW_COLL}' not found. Aborting.")
+        return
+    else:
+        print(f"[FOUND] Low collection '{LOW_COLL}' has {len(low.objects)} object(s).")
+
+    low_objects = [obj for obj in low.objects if obj.type == 'MESH']
+
+    # Apply decimate on Low objects
+    for obj in low_objects:
+        process_low_apply_decimate(obj)
+
+    # Geometry operations on Low objects
+    for obj in low_objects:
+        edit_triangulate_to_quads(obj)
+
+    print("=== Fix nGones finished ===")
+
+# Operator for Convert
+class ConvertOperator(bpy.types.Operator):
+    bl_idname = "object.convert_to_gaming"
+    bl_label = "Convert"
+    bl_description = "Duplicate and prep low-poly objects, hide High"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        convert_main()
         return {'FINISHED'}
 
-# --------------------------------------------------------------------
-# Operator: Isolate Non-Manifold (toggle)
-# --------------------------------------------------------------------
-class MESH_OT_isolate_non_manifold(bpy.types.Operator):
-    bl_idname = "mesh.isolate_non_manifold"
-    bl_label = "Isolate Non-Manifold"
+# Operator for Fix nGones
+class FixNgonsOperator(bpy.types.Operator):
+    bl_idname = "object.fix_ngons"
+    bl_label = "Fix nGones"
+    bl_description = "Apply dissolve decimate and fix ngons on low-poly objects"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        obj = context.object
-        if obj is None or obj.type != 'MESH':
-            self.report({'WARNING'}, "Select a mesh object")
-            return {'CANCELLED'}
-
-        if context.mode != 'EDIT_MESH':
-            bpy.ops.object.mode_set(mode='EDIT')
-
-        bm = bmesh.from_edit_mesh(obj.data)
-        bm.faces.ensure_lookup_table()
-
-        current = getattr(context.scene, "active_isolate", None)
-        any_hidden = any(f.hide for f in bm.faces)
-
-        # Revert if same isolate
-        if current == "NON_MANIFOLD":
-            bpy.ops.mesh.reveal()
-            bpy.ops.mesh.select_all(action='DESELECT')
-            context.space_data.shading.type = context.scene.original_shading
-            context.tool_settings.mesh_select_mode = context.scene.original_select_mode[:]
-            context.scene.active_isolate = ""
-            return {'FINISHED'}
-
-        # Revert first if needed
-        if current or any_hidden:
-            bpy.ops.mesh.reveal()
-            bpy.ops.mesh.select_all(action='DESELECT')
-
-        # Store original settings
-        context.scene.original_shading = context.space_data.shading.type
-        context.scene.original_select_mode = context.tool_settings.mesh_select_mode[:]
-
-        # Select non-manifold vertices
-        select_non_manifold_full(obj)
-
-        # Hide unselected faces if not showing wireframe
-        if not context.scene.show_wire_isolate:
-            bpy.ops.mesh.hide(unselected=True)
-
-        # Adjust shading
-        context.space_data.shading.type = 'WIREFRAME' if context.scene.show_wire_isolate else 'SOLID'
-
-        context.scene.active_isolate = "NON_MANIFOLD"
+        fix_ngons_main()
         return {'FINISHED'}
 
-
-# --------------------------------------------------------------------
-# Operator: Isolate n-gons (toggle)
-# --------------------------------------------------------------------
-class MESH_OT_isolate_ngons(bpy.types.Operator):
-    bl_idname = "mesh.isolate_ngons"
-    bl_label = "Isolate nGons"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        return toggle_isolate_faces(context, "NGONS")
-
-# --------------------------------------------------------------------
-# Operator: Isolate Triangles (toggle)
-# --------------------------------------------------------------------
-class MESH_OT_isolate_triangles(bpy.types.Operator):
-    bl_idname = "mesh.isolate_triangles"
-    bl_label = "Isolate Triangles"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        return toggle_isolate_faces(context, "TRIS")
-    
-# --------------------------------------------------------------------
-# Operator: Isolate Concave (toggle)
-# --------------------------------------------------------------------
-class MESH_OT_isolate_concave(bpy.types.Operator):
-    bl_idname = "mesh.isolate_concave"
-    bl_label = "Isolate Concave"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        return toggle_isolate_faces(context, "CONCAVE")    
-
-# --------------------------------------------------------------------
-# PANEL
-# --------------------------------------------------------------------
-
-class VIEW3D_PT_gaming_toolkit(bpy.types.Panel):
-    bl_label = "BB Modeling Toolkit"
+# Panel in the N-panel (UI sidebar)
+class ConvertToGamingPanel(bpy.types.Panel):
+    bl_label = "Convert to Gaming"
+    bl_idname = "VIEW3D_PT_convert_to_gaming"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
     bl_category = "Tool"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
 
     def draw(self, context):
         layout = self.layout
-
-        # ------------------------
-        # Isolate Section
-        # ------------------------
-        box = layout.box()
-        box.label(text="Isolate", icon='RESTRICT_SELECT_OFF')
-        box.prop(context.scene, "show_wire_isolate", text="Show Wireframe")
-        box.operator("mesh.isolate_triangles", text="Tris")
-        box.operator("mesh.isolate_ngons", text="nGons")
-        box.operator("mesh.isolate_non_manifold", text="Non-Manifold")
-        box.operator("mesh.isolate_concave", text="Concave")
-
-
-        # ------------------------
-        # Select Section
-        # ------------------------
-        box = layout.box()
-        box.label(text="Select", icon='RESTRICT_SELECT_ON')
-        box.operator("mesh.select_tris", text="Triangles")
-        box.operator("mesh.select_ngons", text="nGons")
-        box.operator("mesh.select_overlapping_vertices", text="Overlapping Verts")
-        box.operator("mesh.select_overlapping_faces", text="Overlapping Faces")
-
-        # ------------------------
-        # Tris Quads
-        # ------------------------
-        box = layout.box()
-        box.label(text="Geometry", icon='MODIFIER')
-        box.operator("mesh.fix_triangulate", text="Triangulate")
-        box.operator("mesh.fix_tris_to_quads", text="Tris → Quads")
-        if context.mode == 'EDIT_MESH':
-            box.operator("mesh.edge_rotate_custom", text="Rotate Edge")
-
-        # ------------------------
-        # Fix Section
-        # ------------------------
-        box = layout.box()
-        box.label(text="Fix", icon='MODIFIER')
-        box.operator("mesh.fix_ngone", text="nGons")
-        box.operator("mesh.cleanup_mesh", text="Cleanup")
-            
-        # ------------------------
-        # Decimate Section
-        # ------------------------
-        box = layout.box()
-        box.label(text="Decimate", icon='MODIFIER')
-
-        # Slider
-        box.prop(context.scene, "decimate_angle_limit", text="Angle Limit")
-
-        # Buttons always present
-        row = box.row()
-        row.operator("mesh.add_planar_decimate", text="Decimate (Planar)")
-        box.operator("mesh.apply_planar_decimate", text="Apply Decimate")
-
-
-
-
-# --------------------------------------------------------------------
-# REGISTER
-# --------------------------------------------------------------------
-classes = (
-    MESH_OT_select_ngons,
-    MESH_OT_isolate_ngons,
-    MESH_OT_isolate_triangles,
-    MESH_OT_revert_view,
-    MESH_OT_fix_ngone,
-    MESH_OT_isolate_non_manifold,
-    MESH_OT_isolate_concave,
-    MESH_OT_triangulate,
-    MESH_OT_tris_to_quads,
-    MESH_OT_edge_rotate,
-    MESH_OT_select_tris,
-    VIEW3D_PT_gaming_toolkit,
-    MESH_OT_select_overlapping_vertices,
-    MESH_OT_select_overlapping_faces,
-    MESH_OT_add_decimate,
-    MESH_OT_apply_decimate,
-    MESH_OT_cleanup,
-)
+        layout.operator(ConvertOperator.bl_idname)
+        layout.operator(FixNgonsOperator.bl_idname)
 
 def register():
-    for c in classes:
-        bpy.utils.register_class(c)
+    bpy.utils.register_class(ConvertOperator)
+    bpy.utils.register_class(FixNgonsOperator)
+    bpy.utils.register_class(ConvertToGamingPanel)
 
-    bpy.types.Scene.show_wire_isolate = bpy.props.BoolProperty(
-        name="Show Wireframe",
-        default=True
-    )
-    bpy.types.Scene.active_isolate = bpy.props.StringProperty(
-        name="Active Isolate",
-        default=""
-    )
-    bpy.types.Scene.original_shading = bpy.props.StringProperty(
-        name="Original Shading",
-        default="SOLID"
-    )
-    bpy.types.Scene.original_select_mode = bpy.props.BoolVectorProperty(
-        name="Original Select Mode",
-        size=3,
-        default=(False, False, True)
-    )
-
-    bpy.types.Scene.decimate_angle_limit = bpy.props.FloatProperty(
-        name="Angle",
-        default=1.0,
-        min=0.0,
-        max=30.0,
-        description="Planar Decimate angle limit",
-        update=update_decimate_angle
-    )
-    
 def unregister():
-    for c in reversed(classes):
-        bpy.utils.unregister_class(c)
-
-    del bpy.types.Scene.show_wire_isolate
-    del bpy.types.Scene.active_isolate
-    del bpy.types.Scene.original_shading
-    del bpy.types.Scene.original_select_mode
+    bpy.utils.unregister_class(ConvertToGamingPanel)
+    bpy.utils.unregister_class(FixNgonsOperator)
+    bpy.utils.unregister_class(ConvertOperator)
 
 if __name__ == "__main__":
     register()
