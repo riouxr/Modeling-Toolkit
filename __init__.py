@@ -671,15 +671,21 @@ class MESH_OT_apply_decimate(bpy.types.Operator):
 
     def execute(self, context):
 
+        # Must be in OBJECT mode to apply modifiers
         if context.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
 
+        # Apply decimate on all selected mesh objects
         for obj in context.selected_objects:
             if obj.type != "MESH":
                 continue
 
             dec = obj.modifiers.get("DecimatePlanar")
+
             if dec:
+                # Switch active object (Blender requires it for modifier_apply)
+                context.view_layer.objects.active = obj
+
                 try:
                     bpy.ops.object.modifier_apply(modifier=dec.name)
                 except Exception as e:
