@@ -824,8 +824,8 @@ class VIEW3D_PT_gaming_toolkit(bpy.types.Panel):
         box.label(text="Geometry", icon='MODIFIER')
         box.operator("mesh.fix_triangulate", text="Triangulate")
         box.operator("mesh.fix_tris_to_quads", text="Tris → Quads")
-        box.operator("object.apply_all_modifiers", icon='CHECKMARK')
-        box.operator("object.delete_all_modifiers", icon='TRASH')
+        box.operator("object.apply_all_modifiers")
+        box.operator("object.delete_all_modifiers")
         if context.mode == 'EDIT_MESH':
             box.operator("mesh.edge_rotate_custom", text="Rotate Edge")
 
