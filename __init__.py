@@ -2,9 +2,9 @@ bl_info = {
     "name": "BB Modeling toolkit",
     "category": "Mesh",
     "author": "Blender Bob",
-    "version": (3, 0),
-    "blender": (4, 5, 0),
-    "location": "View3D > N panel > Modeling toolkit",
+    "version": (3, 0, 0),
+    "blender": (4, 2, 0),
+    "location": "View3D > N panel > Modeling Toolkit",
     "description": "Most used tools when modeling for gaming",
 }
 
@@ -423,6 +423,9 @@ def toggle_isolate_faces(context, face_type):
 
     context.tool_settings.mesh_select_mode = (False, False, True)
 
+    # The operators above invalidate the bmeshes captured earlier, re-acquire them
+    bmeshes = [bmesh.from_edit_mesh(obj.data) for obj in objs]
+
     for bm in bmeshes:
         for f in bm.faces:
             f.select = False
@@ -580,7 +583,10 @@ class MESH_OT_tris_to_quads(bpy.types.Operator):
 
 
 class OBJECT_OT_apply_all_modifiers(bpy.types.Operator):
-    bl_idname = "object.apply_all_modifiers"
+    # Namespaced with a bb_ prefix: the plain "object.apply_all_modifiers"
+    # idname is also used by the Modifier Tools add-on, and whichever
+    # registers last silently replaces the other.
+    bl_idname = "object.bb_apply_all_modifiers"
     bl_label = "Apply All Modifiers"
     bl_description = "Apply every modifier, in order, on each selected mesh object"
     bl_options = {'REGISTER', 'UNDO'}
@@ -607,7 +613,7 @@ class OBJECT_OT_apply_all_modifiers(bpy.types.Operator):
 
 
 class OBJECT_OT_delete_all_modifiers(bpy.types.Operator):
-    bl_idname = "object.delete_all_modifiers"
+    bl_idname = "object.bb_delete_all_modifiers"
     bl_label = "Delete All Modifiers"
     bl_description = "Remove all modifiers from each selected mesh object"
     bl_options = {'REGISTER', 'UNDO'}
@@ -801,7 +807,7 @@ class MESH_OT_apply_decimate(bpy.types.Operator):
 # --------------------------------------------------------------------
 class VIEW3D_PT_gaming_toolkit(bpy.types.Panel):
     bl_label = "BB Modeling Toolkit"
-    bl_category = "Tool"
+    bl_category = "Modeling Toolkit"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
 
@@ -824,8 +830,8 @@ class VIEW3D_PT_gaming_toolkit(bpy.types.Panel):
         box.label(text="Geometry", icon='MODIFIER')
         box.operator("mesh.fix_triangulate", text="Triangulate")
         box.operator("mesh.fix_tris_to_quads", text="Tris → Quads")
-        box.operator("object.apply_all_modifiers")
-        box.operator("object.delete_all_modifiers")
+        box.operator("object.bb_apply_all_modifiers")
+        box.operator("object.bb_delete_all_modifiers")
         if context.mode == 'EDIT_MESH':
             box.operator("mesh.edge_rotate_custom", text="Rotate Edge")
 

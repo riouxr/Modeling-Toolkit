@@ -1,11 +1,11 @@
 schema_version = "1.0.0"
 id = "GamingToolkit"
 version = "3.0.0"
-name = "Gaming Toolkit"
-tagline = "Gaming Toolkit"
+name = "BB Modeling Toolkit"
+tagline = "Most used tools when modeling for gaming"
 maintainer = "Blender Bob"
 type = "add-on"
-website = "https://github.com/riouxr/Copy-Shapekeys"
+website = "https://github.com/riouxr/Modeling-Toolkit"
 tags = ["Mesh"]
 blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
